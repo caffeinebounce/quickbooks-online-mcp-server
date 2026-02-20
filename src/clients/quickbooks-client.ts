@@ -1,26 +1,19 @@
-import dotenv from "dotenv";
 import QuickBooks from "node-quickbooks";
 import OAuthClient from "intuit-oauth";
 import http from 'http';
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
 import open from 'open';
+import { bootstrapQuickBooksEnv } from "./env-bootstrap.js";
 
-dotenv.config();
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const client_id = process.env.QUICKBOOKS_CLIENT_ID;
-const client_secret = process.env.QUICKBOOKS_CLIENT_SECRET;
-const refresh_token = process.env.QUICKBOOKS_REFRESH_TOKEN;
-const realm_id = process.env.QUICKBOOKS_REALM_ID;
-const environment = process.env.QUICKBOOKS_ENVIRONMENT || 'sandbox';
-const redirect_uri = 'http://localhost:8000/callback';
-
-// Only throw error if client_id or client_secret is missing
-if (!client_id || !client_secret || !redirect_uri) {
-  throw Error("Client ID, Client Secret and Redirect URI must be set in environment variables");
-}
+const qb = bootstrapQuickBooksEnv();
+const client_id = qb.clientId;
+const client_secret = qb.clientSecret;
+const refresh_token = qb.refreshToken;
+const realm_id = qb.realmId;
+const environment = qb.environment;
+const redirect_uri = qb.redirectUri;
+const env_file_path = qb.envFilePath;
 
 class QuickbooksClient {
   private readonly clientId: string;
@@ -153,7 +146,7 @@ class QuickbooksClient {
   }
 
   private saveTokensToEnv(): void {
-    const tokenPath = path.join(__dirname, '..', '..', '.env');
+    const tokenPath = env_file_path;
     const envContent = fs.readFileSync(tokenPath, 'utf-8');
     const envLines = envContent.split('\n');
     
@@ -187,6 +180,13 @@ class QuickbooksClient {
       const authResponse = await this.oauthClient.refreshUsingToken(this.refreshToken);
       
       this.accessToken = authResponse.token.access_token;
+
+      // QuickBooks uses rolling refresh tokens - persist when rotated
+      const nextRefreshToken = (authResponse.token as any).refresh_token as string | undefined;
+      if (nextRefreshToken && nextRefreshToken !== this.refreshToken) {
+        this.refreshToken = nextRefreshToken;
+        this.saveTokensToEnv();
+      }
       
       // Calculate expiry time
       const expiresIn = authResponse.token.expires_in || 3600; // Default to 1 hour
