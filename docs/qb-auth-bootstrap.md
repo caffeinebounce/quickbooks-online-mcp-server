@@ -39,6 +39,18 @@ Normalized behavior:
 - `quickbooks` now persists rotated refresh tokens
 - `quickbooks-reports` already persisted rotated refresh tokens
 
+## One-time re-auth (if refresh token is invalid)
+
+If you hit `invalid_grant`, run:
+
+```bash
+cd ~/mcp-servers/quickbooks
+QUICKBOOKS_ENV_FILE=~/mcp-servers/quickbooks/.env \
+  node scripts/bootstrap-qb-oauth.mjs
+```
+
+This opens Intuit auth and writes new `QUICKBOOKS_REFRESH_TOKEN` + `QUICKBOOKS_REALM_ID` to the shared env file.
+
 ## Health-check routine (Audra context)
 
 ```bash
