@@ -5,6 +5,7 @@ import fs from 'fs';
 import path from 'path';
 import open from 'open';
 import { bootstrapQuickBooksEnv } from "./env-bootstrap.js";
+import { persistQuickBooksRefreshTokenToWarehouse } from "./warehouse-token-sync.js";
 
 const qb = bootstrapQuickBooksEnv();
 const client_id = qb.clientId;
@@ -14,6 +15,24 @@ const realm_id = qb.realmId;
 const environment = qb.environment;
 const redirect_uri = qb.redirectUri;
 const env_file_path = qb.envFilePath;
+
+type QuickBooksTokenPayload = {
+  access_token?: string;
+  refresh_token?: string;
+  expires_in?: number;
+  realmId?: string;
+};
+
+function quickBooksTokenPayload(response: any): QuickBooksTokenPayload {
+  const token = response?.token;
+  if (typeof token?.getToken === 'function') {
+    return token.getToken();
+  }
+  if (typeof response?.getToken === 'function') {
+    return response.getToken();
+  }
+  return token ?? response ?? {};
+}
 
 class QuickbooksClient {
   private readonly clientId: string;
@@ -64,12 +83,15 @@ class QuickbooksClient {
         if (req.url?.startsWith('/callback')) {
           try {
             const response = await this.oauthClient.createToken(req.url);
-            const tokens = response.token;
+            const tokens = quickBooksTokenPayload(response);
+            if (!tokens.refresh_token) {
+              throw new Error('QuickBooks OAuth response omitted refresh_token');
+            }
             
             // Save tokens
             this.refreshToken = tokens.refresh_token;
             this.realmId = tokens.realmId;
-            this.saveTokensToEnv();
+            await this.persistTokensAfterQuickBooksAuth();
             
             // Send success response
             res.writeHead(200, { 'Content-Type': 'text/html' });
@@ -165,6 +187,22 @@ class QuickbooksClient {
     fs.writeFileSync(tokenPath, envLines.join('\n'));
   }
 
+  private async persistTokensAfterQuickBooksAuth(): Promise<void> {
+    this.saveTokensToEnv();
+    await this.persistRefreshTokenToWarehouse();
+  }
+
+  private async persistRefreshTokenToWarehouse(): Promise<void> {
+    if (!this.refreshToken) return;
+
+    const result = await persistQuickBooksRefreshTokenToWarehouse(this.refreshToken);
+    if (result.synced) {
+      console.warn(`[QuickBooks MCP] Refresh token synced to Warehouse secrets for ${result.warehouseId}`);
+    } else {
+      console.warn(`[QuickBooks MCP] Warehouse refresh token sync skipped: ${result.skippedReason}`);
+    }
+  }
+
   async refreshAccessToken() {
     if (!this.refreshToken) {
       await this.startOAuthFlow();
@@ -178,18 +216,32 @@ class QuickbooksClient {
     try {
       // At this point we know refreshToken is not undefined
       const authResponse = await this.oauthClient.refreshUsingToken(this.refreshToken);
-      
-      this.accessToken = authResponse.token.access_token;
+      const tokens = quickBooksTokenPayload(authResponse);
 
-      // QuickBooks uses rolling refresh tokens - persist when rotated
-      const nextRefreshToken = (authResponse.token as any).refresh_token as string | undefined;
-      if (nextRefreshToken && nextRefreshToken !== this.refreshToken) {
+      if (!tokens.access_token) {
+        throw new Error('QuickBooks refresh response omitted access_token');
+      }
+      if (!tokens.refresh_token) {
+        throw new Error('QuickBooks refresh response omitted refresh_token');
+      }
+
+      this.accessToken = tokens.access_token;
+
+      // QuickBooks uses rolling refresh tokens. Push every successful refresh
+      // through Warehouse too, so cloud secrets heal even if Intuit returns the
+      // same refresh token value this time.
+      const nextRefreshToken = tokens.refresh_token;
+      const refreshTokenChanged = Boolean(nextRefreshToken && nextRefreshToken !== this.refreshToken);
+      if (nextRefreshToken) {
         this.refreshToken = nextRefreshToken;
+      }
+      if (refreshTokenChanged) {
         this.saveTokensToEnv();
       }
+      await this.persistRefreshTokenToWarehouse();
       
       // Calculate expiry time
-      const expiresIn = authResponse.token.expires_in || 3600; // Default to 1 hour
+      const expiresIn = tokens.expires_in || 3600; // Default to 1 hour
       this.accessTokenExpiry = new Date(Date.now() + expiresIn * 1000);
       
       return {
