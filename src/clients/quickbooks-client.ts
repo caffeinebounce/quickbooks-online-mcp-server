@@ -23,6 +23,12 @@ type QuickBooksTokenPayload = {
   realmId?: string;
 };
 
+type OAuthCallbackConfig = {
+  origin: string;
+  path: string;
+  port: number;
+};
+
 function quickBooksTokenPayload(response: any): QuickBooksTokenPayload {
   const token = response?.token;
   if (typeof token?.getToken === 'function') {
@@ -32,6 +38,29 @@ function quickBooksTokenPayload(response: any): QuickBooksTokenPayload {
     return response.getToken();
   }
   return token ?? response ?? {};
+}
+
+function oauthCallbackConfig(redirectUri: string): OAuthCallbackConfig {
+  const callbackUrl = new URL(redirectUri);
+  const hostname = callbackUrl.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  const localHostnames = new Set(['localhost', '127.0.0.1', '::1']);
+
+  if (callbackUrl.protocol !== 'http:' || !localHostnames.has(hostname)) {
+    throw new Error(
+      'QUICKBOOKS_REDIRECTURI must be an http://localhost callback URL for the local OAuth flow',
+    );
+  }
+
+  const port = Number(callbackUrl.port || '80');
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    throw new Error(`QUICKBOOKS_REDIRECTURI has an invalid callback port: ${redirectUri}`);
+  }
+
+  return {
+    origin: `${callbackUrl.protocol}//${callbackUrl.host}`,
+    path: callbackUrl.pathname || '/',
+    port,
+  };
 }
 
 class QuickbooksClient {
@@ -74,79 +103,84 @@ class QuickbooksClient {
       return;
     }
 
+    const callback = oauthCallbackConfig(this.redirectUri);
     this.isAuthenticating = true;
-    const port = 8000;
 
     return new Promise((resolve, reject) => {
       // Create temporary server for OAuth callback
       const server = http.createServer(async (req, res) => {
-        if (req.url?.startsWith('/callback')) {
-          try {
-            const response = await this.oauthClient.createToken(req.url);
-            const tokens = quickBooksTokenPayload(response);
-            if (!tokens.refresh_token) {
-              throw new Error('QuickBooks OAuth response omitted refresh_token');
-            }
-            
-            // Save tokens
-            this.refreshToken = tokens.refresh_token;
-            this.realmId = tokens.realmId;
-            await this.persistTokensAfterQuickBooksAuth();
-            
-            // Send success response
-            res.writeHead(200, { 'Content-Type': 'text/html' });
-            res.end(`
-              <html>
-                <body style="
-                  display: flex;
-                  flex-direction: column;
-                  justify-content: center;
-                  align-items: center;
-                  height: 100vh;
-                  margin: 0;
-                  font-family: Arial, sans-serif;
-                  background-color: #f5f5f5;
-                ">
-                  <h2 style="color: #2E8B57;">✓ Successfully connected to QuickBooks!</h2>
-                  <p>You can close this window now.</p>
-                </body>
-              </html>
-            `);
-            
-            // Close server after a short delay
-            setTimeout(() => {
-              server.close();
-              this.isAuthenticating = false;
-              resolve();
-            }, 1000);
-          } catch (error) {
-            console.error('Error during token creation:', error);
-            res.writeHead(500, { 'Content-Type': 'text/html' });
-            res.end(`
-              <html>
-                <body style="
-                  display: flex;
-                  flex-direction: column;
-                  justify-content: center;
-                  align-items: center;
-                  height: 100vh;
-                  margin: 0;
-                  font-family: Arial, sans-serif;
-                  background-color: #fff0f0;
-                ">
-                  <h2 style="color: #d32f2f;">Error connecting to QuickBooks</h2>
-                  <p>Please check the console for more details.</p>
-                </body>
-              </html>
-            `);
-            this.isAuthenticating = false;
-            reject(error);
+        const requestUrl = new URL(req.url ?? '/', callback.origin);
+        if (requestUrl.pathname !== callback.path) {
+          res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+          res.end('Not found');
+          return;
+        }
+
+        try {
+          const response = await this.oauthClient.createToken(requestUrl.toString());
+          const tokens = quickBooksTokenPayload(response);
+          if (!tokens.refresh_token) {
+            throw new Error('QuickBooks OAuth response omitted refresh_token');
           }
+          
+          // Save tokens
+          this.refreshToken = tokens.refresh_token;
+          this.realmId = tokens.realmId;
+          await this.persistTokensAfterQuickBooksAuth();
+          
+          // Send success response
+          res.writeHead(200, { 'Content-Type': 'text/html' });
+          res.end(`
+            <html>
+              <body style="
+                display: flex;
+                flex-direction: column;
+                justify-content: center;
+                align-items: center;
+                height: 100vh;
+                margin: 0;
+                font-family: Arial, sans-serif;
+                background-color: #f5f5f5;
+              ">
+                <h2 style="color: #2E8B57;">✓ Successfully connected to QuickBooks!</h2>
+                <p>You can close this window now.</p>
+              </body>
+            </html>
+          `);
+          
+          // Close server after a short delay
+          setTimeout(() => {
+            server.close();
+            this.isAuthenticating = false;
+            resolve();
+          }, 1000);
+        } catch (error) {
+          console.error('Error during token creation:', error);
+          res.writeHead(500, { 'Content-Type': 'text/html' });
+          res.end(`
+            <html>
+              <body style="
+                display: flex;
+                flex-direction: column;
+                justify-content: center;
+                align-items: center;
+                height: 100vh;
+                margin: 0;
+                font-family: Arial, sans-serif;
+                background-color: #fff0f0;
+              ">
+                <h2 style="color: #d32f2f;">Error connecting to QuickBooks</h2>
+                <p>Please check the console for more details.</p>
+              </body>
+            </html>
+          `);
+          this.isAuthenticating = false;
+          reject(error);
         }
       });
 
       // Start server
-      server.listen(port, async () => {
+      server.listen(callback.port, async () => {
         
         // Generate authorization URL with proper type assertion
         const authUri = this.oauthClient.authorizeUri({
@@ -169,8 +203,9 @@ class QuickbooksClient {
 
   private saveTokensToEnv(): void {
     const tokenPath = env_file_path;
-    const envContent = fs.readFileSync(tokenPath, 'utf-8');
-    const envLines = envContent.split('\n');
+    fs.mkdirSync(path.dirname(tokenPath), { recursive: true });
+    const envContent = fs.existsSync(tokenPath) ? fs.readFileSync(tokenPath, 'utf-8') : '';
+    const envLines = envContent ? envContent.replace(/\n$/, '').split('\n') : [];
     
     const updateEnvVar = (name: string, value: string) => {
       const index = envLines.findIndex(line => line.startsWith(`${name}=`));
@@ -184,7 +219,7 @@ class QuickbooksClient {
     if (this.refreshToken) updateEnvVar('QUICKBOOKS_REFRESH_TOKEN', this.refreshToken);
     if (this.realmId) updateEnvVar('QUICKBOOKS_REALM_ID', this.realmId);
 
-    fs.writeFileSync(tokenPath, envLines.join('\n'));
+    fs.writeFileSync(tokenPath, envLines.join('\n').replace(/\n*$/, '\n'));
   }
 
   private async persistTokensAfterQuickBooksAuth(): Promise<void> {
@@ -195,11 +230,16 @@ class QuickbooksClient {
   private async persistRefreshTokenToWarehouse(): Promise<void> {
     if (!this.refreshToken) return;
 
-    const result = await persistQuickBooksRefreshTokenToWarehouse(this.refreshToken);
-    if (result.synced) {
-      console.warn(`[QuickBooks MCP] Refresh token synced to Warehouse secrets for ${result.warehouseId}`);
-    } else {
-      console.warn(`[QuickBooks MCP] Warehouse refresh token sync skipped: ${result.skippedReason}`);
+    try {
+      const result = await persistQuickBooksRefreshTokenToWarehouse(this.refreshToken);
+      if (result.synced) {
+        console.warn(`[QuickBooks MCP] Refresh token synced to Warehouse secrets for ${result.warehouseId}`);
+      } else {
+        console.warn(`[QuickBooks MCP] Warehouse refresh token sync skipped: ${result.skippedReason}`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[QuickBooks MCP] Warehouse refresh token sync failed; continuing: ${message}`);
     }
   }
 

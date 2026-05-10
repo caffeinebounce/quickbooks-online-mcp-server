@@ -160,7 +160,9 @@ export function resolveWarehouseQuickBooksSyncConfig(
     config.controlPlaneUrl ? undefined : "WAREHOUSE_SYNC_API_URL or WAREHOUSE_SUPABASE_URL",
     config.anonKey ? undefined : "WAREHOUSE_SYNC_SUPABASE_ANON_KEY or SUPABASE_ANON_KEY",
     config.workerToken ? undefined : "WAREHOUSE_DEVICE_TOKEN",
-    config.warehouseId ? undefined : "WAREHOUSE_ID or one QuickBooks warehouse config",
+    config.warehouseId
+      ? undefined
+      : "WAREHOUSE_QUICKBOOKS_WAREHOUSE_ID, WAREHOUSE_CLOUD_WAREHOUSE_ID, WAREHOUSE_ID, or one QuickBooks warehouse config",
   ].filter((name): name is string => Boolean(name));
 
   if (missing.length > 0) {
@@ -225,15 +227,21 @@ export async function persistQuickBooksRefreshTokenToWarehouse(
 
     const responseText = await response.text().catch(() => "");
     if (!response.ok) {
-      throw new Error(
-        `Warehouse QuickBooks token sync failed (${response.status} ${response.statusText}): `
+      return {
+        synced: false,
+        skippedReason: `Warehouse QuickBooks token sync failed (${response.status} ${response.statusText}): `
         + (responseText || "empty response"),
-      );
+      };
     }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      synced: false,
+      skippedReason: `Warehouse QuickBooks token sync request failed: ${message}`,
+    };
   } finally {
     clearTimeout(timeout);
   }
 
   return { synced: true, warehouseId: resolved.config.warehouseId };
 }
-

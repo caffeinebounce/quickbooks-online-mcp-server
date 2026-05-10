@@ -3,14 +3,17 @@ import fs from 'fs';
 import path from 'path';
 import http from 'http';
 import https from 'https';
+import os from 'os';
 import { URLSearchParams } from 'url';
 import open from 'open';
 import dotenv from 'dotenv';
 
 // ── env resolution ────────────────────────────────────────────────────────────
+const home = os.homedir() || process.env.HOME || '';
 const candidates = [
   process.env.QUICKBOOKS_ENV_FILE,
-  path.join(process.env.HOME || '', 'mcp-servers/quickbooks/.env'),
+  home ? path.join(home, 'mcp-servers/quickbooks/.env') : undefined,
+  home ? path.join(home, '.quickbooks/.env') : undefined,
   path.join(process.cwd(), '.env'),
 ].filter(Boolean);
 const envFile = candidates.find((p) => fs.existsSync(p));
@@ -19,15 +22,17 @@ else dotenv.config();
 
 const clientId     = process.env.QUICKBOOKS_CLIENT_ID;
 const clientSecret = process.env.QUICKBOOKS_CLIENT_SECRET;
-const environment  = process.env.QUICKBOOKS_ENVIRONMENT || 'production';
+const environment  = process.env.QUICKBOOKS_ENVIRONMENT || 'sandbox';
 
 // registeredUri = what Intuit has in the developer portal (used in exchange)
 // localPort     = where this script listens (site may proxy/redirect there)
-const registeredUri = process.env.QUICKBOOKS_REDIRECTURI || 'http://localhost:8081/callback';
+const registeredUri = process.env.QUICKBOOKS_REDIRECTURI || 'http://localhost:8000/callback';
 const parsedUri     = new URL(registeredUri);
+const parsedHostname = parsedUri.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+const isLocalRedirect = ['localhost', '127.0.0.1', '::1'].includes(parsedHostname);
 const localPort     = Number(
   process.env.QUICKBOOKS_LOCAL_PORT ||
-  (parsedUri.hostname === 'localhost' ? parsedUri.port : 8081)
+  (isLocalRedirect ? parsedUri.port || 80 : 8081)
 );
 
 if (!clientId || !clientSecret) {
@@ -37,7 +42,8 @@ if (!clientId || !clientSecret) {
 
 // ── env writer ────────────────────────────────────────────────────────────────
 function updateEnv(updates) {
-  const target = envFile || path.join(process.cwd(), '.env');
+  const target = envFile || candidates[0] || path.join(process.cwd(), '.env');
+  fs.mkdirSync(path.dirname(target), { recursive: true });
   const current = fs.existsSync(target) ? fs.readFileSync(target, 'utf8') : '';
   const map = new Map(
     current.split('\n').filter(Boolean).map((l) => {

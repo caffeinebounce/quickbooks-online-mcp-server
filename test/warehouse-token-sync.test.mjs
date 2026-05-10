@@ -100,3 +100,57 @@ test("persists QuickBooks refresh token to Warehouse control plane", async () =>
   });
 });
 
+test("reports all supported warehouse id sources when sync config is missing", () => {
+  const result = resolveWarehouseQuickBooksSyncConfig({
+    env: {
+      WAREHOUSE_SYNC_API_URL: "https://example.test/functions/v1/warehouse",
+      WAREHOUSE_SYNC_SUPABASE_ANON_KEY: "anon-key",
+      WAREHOUSE_DEVICE_TOKEN: "worker-token",
+    },
+    fallbackEnv: {},
+    warehousesDir: path.join(os.tmpdir(), "missing-qb-warehouse-configs"),
+  });
+
+  assert.equal(result.ok, false);
+  assert.match(
+    result.missing.join(", "),
+    /WAREHOUSE_QUICKBOOKS_WAREHOUSE_ID, WAREHOUSE_CLOUD_WAREHOUSE_ID, WAREHOUSE_ID/,
+  );
+});
+
+test("treats Warehouse control-plane HTTP failures as skipped sync", async () => {
+  const result = await persistQuickBooksRefreshTokenToWarehouse("rotated-refresh", {
+    env: {
+      WAREHOUSE_SYNC_API_URL: "https://example.test/functions/v1/warehouse",
+      WAREHOUSE_SYNC_SUPABASE_ANON_KEY: "anon-key",
+      WAREHOUSE_DEVICE_TOKEN: "worker-token",
+      WAREHOUSE_ID: "tcc",
+    },
+    fallbackEnv: {},
+    fetchImpl: async () => new Response("temporarily unavailable", {
+      status: 503,
+      statusText: "Service Unavailable",
+    }),
+  });
+
+  assert.equal(result.synced, false);
+  assert.match(result.skippedReason, /503 Service Unavailable/);
+});
+
+test("treats Warehouse control-plane network failures as skipped sync", async () => {
+  const result = await persistQuickBooksRefreshTokenToWarehouse("rotated-refresh", {
+    env: {
+      WAREHOUSE_SYNC_API_URL: "https://example.test/functions/v1/warehouse",
+      WAREHOUSE_SYNC_SUPABASE_ANON_KEY: "anon-key",
+      WAREHOUSE_DEVICE_TOKEN: "worker-token",
+      WAREHOUSE_ID: "tcc",
+    },
+    fallbackEnv: {},
+    fetchImpl: async () => {
+      throw new Error("network is down");
+    },
+  });
+
+  assert.equal(result.synced, false);
+  assert.match(result.skippedReason, /network is down/);
+});

@@ -1,5 +1,6 @@
 import dotenv from "dotenv";
 import fs from "fs";
+import os from "os";
 import path from "path";
 
 export type QBCreds = {
@@ -21,11 +22,16 @@ const REQUIRED_VARS = [
 
 function candidateEnvPaths(): string[] {
   const fromEnv = process.env.QUICKBOOKS_ENV_FILE;
-  const home = process.env.HOME || "";
+  const home = os.homedir() || process.env.HOME || "";
+  const homeCandidates = home
+    ? [
+        path.join(home, "mcp-servers/quickbooks/.env"),
+        path.join(home, ".quickbooks/.env"),
+      ]
+    : [];
   return [
     fromEnv,
-    path.join(home, "mcp-servers/quickbooks/.env"),
-    path.join(home, ".quickbooks/.env"),
+    ...homeCandidates,
     path.join(process.cwd(), ".env"),
   ].filter((p): p is string => !!p);
 }
@@ -65,7 +71,7 @@ export function bootstrapQuickBooksEnv(): QBCreds {
     clientSecret: process.env.QUICKBOOKS_CLIENT_SECRET!,
     refreshToken: process.env.QUICKBOOKS_REFRESH_TOKEN!,
     realmId: process.env.QUICKBOOKS_REALM_ID!,
-    environment: process.env.QUICKBOOKS_ENVIRONMENT || "production",
+    environment: process.env.QUICKBOOKS_ENVIRONMENT || "sandbox",
     redirectUri: process.env.QUICKBOOKS_REDIRECTURI || "http://localhost:8000/callback",
     envFilePath: envFilePath || candidates[0] || path.join(process.cwd(), ".env"),
   };
